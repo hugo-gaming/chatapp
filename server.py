@@ -313,7 +313,9 @@ async def main():
     print("✅ Base de données initialisée.")
     print("🚀 Serveur démarré sur ws://localhost:8765")
     print("   Ouvre index.html dans ton navigateur pour te connecter !\n")
-    async with serve(handler, "localhost", 8765):
+    import os
+    port = int(os.environ.get("PORT", 8765))
+    async with serve(handler, "0.0.0.0", port):
         await asyncio.Future()
 
 if __name__ == "__main__":
