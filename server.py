@@ -274,6 +274,30 @@ async def handle_typing(ws, data):
 
 # ─── Dispatcher ─────────────────────────────────────────────────────────────
 
+async def handle_webrtc_relay(ws, data):
+    """Relaye les messages WebRTC vers le bon destinataire"""
+    if ws not in clients:
+        return
+    info = clients[ws]
+    target_id = data.get("target")
+    # Ajoute l'identité de l'expéditeur
+    data["from_id"] = info["user_id"]
+    data["from_name"] = info["username"]
+    # Trouve le websocket cible
+    target_ws = next((w for w, i in clients.items() if i["user_id"] == target_id), None)
+    if target_ws:
+        await target_ws.send(json.dumps(data))
+
+async def handle_call_broadcast(ws, data):
+    """Broadcast un événement d'appel à tout le canal"""
+    if ws not in clients:
+        return
+    info = clients[ws]
+    channel_id = data.get("channel_id", info["channel"])
+    data["caller_id"] = info["user_id"]
+    data["caller"] = info["username"]
+    await broadcast(channel_id, data, exclude=ws)
+
 HANDLERS = {
     "register":       handle_register,
     "login":          handle_login,
@@ -282,6 +306,11 @@ HANDLERS = {
     "delete_message": handle_delete_message,
     "reaction":       handle_reaction,
     "typing":         handle_typing,
+    "call_start":     handle_call_broadcast,
+    "call_end":       handle_call_broadcast,
+    "webrtc_offer":   handle_webrtc_relay,
+    "webrtc_answer":  handle_webrtc_relay,
+    "ice_candidate":  handle_webrtc_relay,
 }
 
 async def handler(ws):
