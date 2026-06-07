@@ -45,6 +45,11 @@ def init_db():
         "INSERT OR IGNORE INTO channels (id, name, type) VALUES (?, ?, ?)",
         [("general","général","text"),("gaming","gaming","text"),("musique","musique","text")]
     )
+    # Migration : ajoute birthdate si elle nexiste pas
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN birthdate TEXT")
+    except:
+        pass
     conn.commit()
     conn.close()
 
