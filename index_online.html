@@ -193,13 +193,30 @@ body.theme-red{--accent:#ed4245;--accent-hover:#c03537}
   <div class="auth-box">
     <h1>💬 ChatApp</h1>
     <p>Connecte-toi ou crée un compte</p>
-    <div class="auth-tabs">
+    <div class="auth-tabs" style="flex-wrap:wrap">
       <button class="auth-tab active" onclick="setTab('login')">Connexion</button>
       <button class="auth-tab" onclick="setTab('register')">Inscription</button>
+      <button class="auth-tab" onclick="setTab('reset')" style="font-size:12px">Mot de passe oublié</button>
     </div>
-    <input id="auth-user" class="auth-input" placeholder="Pseudo" maxlength="24"/>
-    <input id="auth-pass" class="auth-input" type="password" placeholder="Mot de passe" onkeydown="if(event.key==='Enter')doAuth()"/>
-    <button class="auth-btn" id="auth-btn" onclick="doAuth()">Se connecter</button>
+    <div id="tab-login">
+      <input id="auth-user" class="auth-input" placeholder="Pseudo" maxlength="24"/>
+      <input id="auth-pass" class="auth-input" type="password" placeholder="Mot de passe" onkeydown="if(event.key==='Enter')doAuth()"/>
+      <button class="auth-btn" id="auth-btn" onclick="doAuth()">Se connecter</button>
+    </div>
+    <div id="tab-register" style="display:none">
+      <input id="reg-user" class="auth-input" placeholder="Pseudo" maxlength="24"/>
+      <input id="reg-pass" class="auth-input" type="password" placeholder="Mot de passe"/>
+      <label style="color:var(--text-muted);font-size:12px;display:block;margin-bottom:4px;text-align:left">Date de naissance (pour récupérer ton compte)</label>
+      <input id="reg-birth" class="auth-input" type="date"/>
+      <button class="auth-btn" onclick="doRegister()">S'inscrire</button>
+    </div>
+    <div id="tab-reset" style="display:none">
+      <input id="reset-user" class="auth-input" placeholder="Ton pseudo"/>
+      <label style="color:var(--text-muted);font-size:12px;display:block;margin-bottom:4px;text-align:left">Ta date de naissance</label>
+      <input id="reset-birth" class="auth-input" type="date"/>
+      <input id="reset-newpass" class="auth-input" type="password" placeholder="Nouveau mot de passe"/>
+      <button class="auth-btn" onclick="doReset()">Réinitialiser</button>
+    </div>
     <div class="auth-error" id="auth-error"></div>
     <div class="connecting" id="connecting">Connexion au serveur...</div>
   </div>
@@ -438,7 +455,8 @@ function connect(){
   ws.onerror=()=>{ document.getElementById('connecting').textContent='❌ Impossible de joindre le serveur !'; };
   ws.onmessage=e=>{
     const d=JSON.parse(e.data);
-    if(d.type==='registered'){ setErr('Compte créé !',false); wsSend({type:'login',username:d.username,password:document.getElementById('auth-pass').value}); }
+    if(d.type==='registered'){ setErr('Compte créé !',false); wsSend({type:'login',username:d.username,password:document.getElementById('reg-pass').value}); }
+    else if(d.type==='password_reset_ok'){ setErr('Mot de passe changé ! Tu peux te connecter.',false); setTab('login'); }
     else if(d.type==='logged_in'){ me={user_id:d.user_id,username:d.username,color:d.color}; onLoggedIn(); }
     else if(d.type==='channel_history'){ messages[d.channel_id]=d.messages; if(d.channel_id===currentChannel)renderMessages(); }
     else if(d.type==='new_message'){ (messages[d.channel_id]=messages[d.channel_id]||[]).push(d.message); if(d.channel_id===currentChannel){appendMessage(d.message);scrollBottom();} }
@@ -453,9 +471,28 @@ function wsSend(o){ if(ws&&ws.readyState===1)ws.send(JSON.stringify(o)); }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 document.getElementById('auth-btn').disabled=true;
-function setTab(t){ authTab=t; document.querySelectorAll('.auth-tab').forEach((el,i)=>el.classList.toggle('active',(i===0&&t==='login')||(i===1&&t==='register'))); document.getElementById('auth-btn').textContent=t==='login'?'Se connecter':"S'inscrire"; setErr(''); }
+function setTab(t){
+  authTab=t;
+  ['login','register','reset'].forEach(x=>{ const el=document.getElementById('tab-'+x); if(el)el.style.display=x===t?'block':'none'; });
+  document.querySelectorAll('.auth-tab').forEach((el,i)=>el.classList.toggle('active',['login','register','reset'][i]===t));
+  setErr('');
+}
 function setErr(msg,isErr=true){ const el=document.getElementById('auth-error'); el.textContent=msg; el.style.color=isErr?'#f38ba8':'#23a559'; }
-function doAuth(){ const u=document.getElementById('auth-user').value.trim(),p=document.getElementById('auth-pass').value; if(!u||!p)return setErr('Remplis tous les champs.'); setErr(''); wsSend({type:authTab,username:u,password:p}); }
+function doAuth(){ const u=document.getElementById('auth-user').value.trim(),p=document.getElementById('auth-pass').value; if(!u||!p)return setErr('Remplis tous les champs.'); setErr(''); wsSend({type:'login',username:u,password:p}); }
+function doRegister(){
+  const u=document.getElementById('reg-user').value.trim();
+  const p=document.getElementById('reg-pass').value;
+  const b=document.getElementById('reg-birth').value;
+  if(!u||!p||!b)return setErr('Remplis tous les champs !');
+  setErr(''); wsSend({type:'register',username:u,password:p,birthdate:b});
+}
+function doReset(){
+  const u=document.getElementById('reset-user').value.trim();
+  const b=document.getElementById('reset-birth').value;
+  const p=document.getElementById('reset-newpass').value;
+  if(!u||!b||!p)return setErr('Remplis tous les champs !');
+  setErr(''); wsSend({type:'reset_password',username:u,birthdate:b,new_password:p});
+}
 
 function onLoggedIn(){
   loadStorage();

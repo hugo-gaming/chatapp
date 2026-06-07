@@ -22,7 +22,8 @@ def init_db():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             color TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            birthdate TEXT
         );
 
         CREATE TABLE IF NOT EXISTS channels (
@@ -99,15 +100,17 @@ async def broadcast_presence():
 async def handle_register(ws, data):
     username = data.get("username", "").strip()
     password = data.get("password", "")
-    if not username or not password:
+    birthdate = data.get("birthdate", "").strip()
+    if not username or not password or not birthdate:
+        return await ws.send(json.dumps({"type": "error", "msg": "Tous les champs sont requis."}))
         return await ws.send(json.dumps({"type": "error", "msg": "Nom d'utilisateur et mot de passe requis."}))
     db = get_db()
     color = COLORS[hash(username) % len(COLORS)]
     user_id = str(uuid.uuid4())
     try:
         db.execute(
-            "INSERT INTO users (id, username, password_hash, color, created_at) VALUES (?,?,?,?,?)",
-            (user_id, username, hash_pw(password), color, datetime.utcnow().isoformat())
+            "INSERT INTO users (id, username, password_hash, color, created_at, birthdate) VALUES (?,?,?,?,?,?)",
+            (user_id, username, hash_pw(password), color, datetime.utcnow().isoformat(), birthdate)
         )
         db.commit()
         await ws.send(json.dumps({"type": "registered", "user_id": user_id, "username": username, "color": color}))
@@ -117,6 +120,23 @@ async def handle_register(ws, data):
         db.close()
 
 async def handle_login(ws, data):
+
+async def handle_reset_password(ws, data):
+    username = data.get("username", "").strip()
+    birthdate = data.get("birthdate", "").strip()
+    new_password = data.get("new_password", "")
+    if not username or not birthdate or not new_password:
+        return await ws.send(json.dumps({"type": "error", "msg": "Tous les champs sont requis."}))
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE username=? AND birthdate=?", (username, birthdate)).fetchone()
+    if not row:
+        db.close()
+        return await ws.send(json.dumps({"type": "error", "msg": "Pseudo ou date de naissance incorrecte."}))
+    db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pw(new_password), username))
+    db.commit()
+    db.close()
+    await ws.send(json.dumps({"type": "password_reset_ok"}))
+
     db = get_db()
     row = db.execute(
         "SELECT * FROM users WHERE username=? AND password_hash=?",
@@ -306,6 +326,7 @@ HANDLERS = {
     "delete_message": handle_delete_message,
     "reaction":       handle_reaction,
     "typing":         handle_typing,
+    "reset_password":  handle_reset_password,
     "call_start":     handle_call_broadcast,
     "call_end":       handle_call_broadcast,
     "webrtc_offer":   handle_webrtc_relay,
