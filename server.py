@@ -1,17 +1,11 @@
-"""
-Serveur WebSocket pour l'appli de chat style Discord
-Lancer avec : python server.py
-"""
-
 import asyncio
 import json
 import sqlite3
 import hashlib
 import uuid
+import os
 from datetime import datetime
 from websockets.server import serve
-
-# ─── Base de données ────────────────────────────────────────────────────────
 
 def init_db():
     conn = sqlite3.connect("chat.db")
@@ -25,13 +19,11 @@ def init_db():
             created_at TEXT NOT NULL,
             birthdate TEXT
         );
-
         CREATE TABLE IF NOT EXISTS channels (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             type TEXT NOT NULL DEFAULT 'text'
         );
-
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             channel_id TEXT NOT NULL,
@@ -42,7 +34,6 @@ def init_db():
             FOREIGN KEY (channel_id) REFERENCES channels(id),
             FOREIGN KEY (author_id) REFERENCES users(id)
         );
-
         CREATE TABLE IF NOT EXISTS reactions (
             message_id TEXT NOT NULL,
             emoji TEXT NOT NULL,
@@ -50,14 +41,9 @@ def init_db():
             PRIMARY KEY (message_id, emoji, user_id)
         );
     """)
-    # Canaux par défaut
     c.executemany(
         "INSERT OR IGNORE INTO channels (id, name, type) VALUES (?, ?, ?)",
-        [
-            ("general", "général", "text"),
-            ("gaming",  "gaming",  "text"),
-            ("musique", "musique", "text"),
-        ]
+        [("general","général","text"),("gaming","gaming","text"),("musique","musique","text")]
     )
     conn.commit()
     conn.close()
@@ -69,33 +55,22 @@ def get_db():
 
 COLORS = ["#5865f2","#eb459e","#23a559","#ed4245","#fee75c","#57f287","#9b59b6","#e67e22"]
 
-def hash_pw(pw: str) -> str:
+def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
-# ─── Connexions actives ──────────────────────────────────────────────────────
+clients = {}
 
-# { websocket: { user_id, username, color, channel } }
-clients: dict = {}
-
-async def broadcast(channel_id: str, payload: dict, exclude=None):
-    """Envoie un message à tous les clients d'un canal."""
+async def broadcast(channel_id, payload, exclude=None):
     msg = json.dumps(payload)
-    targets = [ws for ws, info in clients.items()
-               if info.get("channel") == channel_id and ws is not exclude]
+    targets = [ws for ws, info in clients.items() if info.get("channel") == channel_id and ws is not exclude]
     if targets:
         await asyncio.gather(*(ws.send(msg) for ws in targets), return_exceptions=True)
 
 async def broadcast_presence():
-    """Envoie la liste des utilisateurs en ligne à tout le monde."""
-    online = [
-        {"user_id": info["user_id"], "username": info["username"], "color": info["color"]}
-        for info in clients.values()
-    ]
+    online = [{"user_id": info["user_id"], "username": info["username"], "color": info["color"]} for info in clients.values()]
     msg = json.dumps({"type": "presence", "online": online})
     if clients:
         await asyncio.gather(*(ws.send(msg) for ws in clients), return_exceptions=True)
-
-# ─── Handlers ───────────────────────────────────────────────────────────────
 
 async def handle_register(ws, data):
     username = data.get("username", "").strip()
@@ -103,7 +78,6 @@ async def handle_register(ws, data):
     birthdate = data.get("birthdate", "").strip()
     if not username or not password or not birthdate:
         return await ws.send(json.dumps({"type": "error", "msg": "Tous les champs sont requis."}))
-        return await ws.send(json.dumps({"type": "error", "msg": "Nom d'utilisateur et mot de passe requis."}))
     db = get_db()
     color = COLORS[hash(username) % len(COLORS)]
     user_id = str(uuid.uuid4())
@@ -120,6 +94,17 @@ async def handle_register(ws, data):
         db.close()
 
 async def handle_login(ws, data):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM users WHERE username=? AND password_hash=?",
+        (data.get("username",""), hash_pw(data.get("password","")))
+    ).fetchone()
+    db.close()
+    if not row:
+        return await ws.send(json.dumps({"type": "error", "msg": "Identifiants incorrects."}))
+    clients[ws] = {"user_id": row["id"], "username": row["username"], "color": row["color"], "channel": "general"}
+    await ws.send(json.dumps({"type": "logged_in", "user_id": row["id"], "username": row["username"], "color": row["color"]}))
+    await broadcast_presence()
 
 async def handle_reset_password(ws, data):
     username = data.get("username", "").strip()
@@ -137,63 +122,25 @@ async def handle_reset_password(ws, data):
     db.close()
     await ws.send(json.dumps({"type": "password_reset_ok"}))
 
-    db = get_db()
-    row = db.execute(
-        "SELECT * FROM users WHERE username=? AND password_hash=?",
-        (data.get("username",""), hash_pw(data.get("password","")))
-    ).fetchone()
-    db.close()
-    if not row:
-        return await ws.send(json.dumps({"type": "error", "msg": "Identifiants incorrects."}))
-    clients[ws] = {
-        "user_id": row["id"],
-        "username": row["username"],
-        "color": row["color"],
-        "channel": "general"
-    }
-    await ws.send(json.dumps({
-        "type": "logged_in",
-        "user_id": row["id"],
-        "username": row["username"],
-        "color": row["color"]
-    }))
-    await broadcast_presence()
-
 async def handle_join_channel(ws, data):
     if ws not in clients:
         return
     channel_id = data.get("channel_id", "general")
     clients[ws]["channel"] = channel_id
-    # Récupère l'historique
     db = get_db()
     rows = db.execute("""
-        SELECT m.id, m.content, m.timestamp, m.deleted,
-               u.username, u.color, u.id as author_id
-        FROM messages m
-        JOIN users u ON m.author_id = u.id
-        WHERE m.channel_id = ?
-        ORDER BY m.timestamp ASC
-        LIMIT 50
+        SELECT m.id, m.content, m.timestamp, m.deleted, u.username, u.color, u.id as author_id
+        FROM messages m JOIN users u ON m.author_id = u.id
+        WHERE m.channel_id = ? ORDER BY m.timestamp ASC LIMIT 50
     """, (channel_id,)).fetchall()
     messages = []
     for r in rows:
         reactions = {}
         if not r["deleted"]:
-            rxns = db.execute(
-                "SELECT emoji, user_id FROM reactions WHERE message_id=?", (r["id"],)
-            ).fetchall()
+            rxns = db.execute("SELECT emoji, user_id FROM reactions WHERE message_id=?", (r["id"],)).fetchall()
             for rx in rxns:
                 reactions.setdefault(rx["emoji"], []).append(rx["user_id"])
-        messages.append({
-            "id": r["id"],
-            "author": r["username"],
-            "author_id": r["author_id"],
-            "color": r["color"],
-            "text": r["content"],
-            "time": r["timestamp"],
-            "deleted": bool(r["deleted"]),
-            "reactions": reactions
-        })
+        messages.append({"id": r["id"], "author": r["username"], "author_id": r["author_id"], "color": r["color"], "text": r["content"], "time": r["timestamp"], "deleted": bool(r["deleted"]), "reactions": reactions})
     db.close()
     await ws.send(json.dumps({"type": "channel_history", "channel_id": channel_id, "messages": messages}))
 
@@ -208,26 +155,11 @@ async def handle_send_message(ws, data):
     msg_id = str(uuid.uuid4())
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     db = get_db()
-    db.execute(
-        "INSERT INTO messages (id, channel_id, author_id, content, timestamp) VALUES (?,?,?,?,?)",
-        (msg_id, channel_id, info["user_id"], content, timestamp)
-    )
+    db.execute("INSERT INTO messages (id, channel_id, author_id, content, timestamp) VALUES (?,?,?,?,?)",
+               (msg_id, channel_id, info["user_id"], content, timestamp))
     db.commit()
     db.close()
-    payload = {
-        "type": "new_message",
-        "channel_id": channel_id,
-        "message": {
-            "id": msg_id,
-            "author": info["username"],
-            "author_id": info["user_id"],
-            "color": info["color"],
-            "text": content,
-            "time": timestamp,
-            "deleted": False,
-            "reactions": {}
-        }
-    }
+    payload = {"type": "new_message", "channel_id": channel_id, "message": {"id": msg_id, "author": info["username"], "author_id": info["user_id"], "color": info["color"], "text": content, "time": timestamp, "deleted": False, "reactions": {}}}
     await broadcast(channel_id, payload)
 
 async def handle_delete_message(ws, data):
@@ -240,14 +172,10 @@ async def handle_delete_message(ws, data):
     if not row:
         db.close()
         return await ws.send(json.dumps({"type": "error", "msg": "Message introuvable."}))
-    if row["author_id"] != info["user_id"]:
-        db.close()
-        return await ws.send(json.dumps({"type": "error", "msg": "Tu ne peux supprimer que tes propres messages."}))
     db.execute("UPDATE messages SET deleted=1 WHERE id=?", (msg_id,))
     db.commit()
     db.close()
-    channel_id = info["channel"]
-    await broadcast(channel_id, {"type": "message_deleted", "channel_id": channel_id, "message_id": msg_id})
+    await broadcast(info["channel"], {"type": "message_deleted", "channel_id": info["channel"], "message_id": msg_id})
 
 async def handle_reaction(ws, data):
     if ws not in clients:
@@ -256,60 +184,37 @@ async def handle_reaction(ws, data):
     msg_id = data.get("message_id")
     emoji = data.get("emoji")
     db = get_db()
-    existing = db.execute(
-        "SELECT 1 FROM reactions WHERE message_id=? AND emoji=? AND user_id=?",
-        (msg_id, emoji, info["user_id"])
-    ).fetchone()
+    existing = db.execute("SELECT 1 FROM reactions WHERE message_id=? AND emoji=? AND user_id=?", (msg_id, emoji, info["user_id"])).fetchone()
     if existing:
-        db.execute("DELETE FROM reactions WHERE message_id=? AND emoji=? AND user_id=?",
-                   (msg_id, emoji, info["user_id"]))
+        db.execute("DELETE FROM reactions WHERE message_id=? AND emoji=? AND user_id=?", (msg_id, emoji, info["user_id"]))
     else:
-        db.execute("INSERT INTO reactions (message_id, emoji, user_id) VALUES (?,?,?)",
-                   (msg_id, emoji, info["user_id"]))
+        db.execute("INSERT INTO reactions (message_id, emoji, user_id) VALUES (?,?,?)", (msg_id, emoji, info["user_id"]))
     db.commit()
-    # Recompute reactions for this message
     rxns = db.execute("SELECT emoji, user_id FROM reactions WHERE message_id=?", (msg_id,)).fetchall()
     db.close()
     reactions = {}
     for rx in rxns:
         reactions.setdefault(rx["emoji"], []).append(rx["user_id"])
-    channel_id = info["channel"]
-    await broadcast(channel_id, {
-        "type": "reaction_update",
-        "channel_id": channel_id,
-        "message_id": msg_id,
-        "reactions": reactions
-    })
+    await broadcast(info["channel"], {"type": "reaction_update", "channel_id": info["channel"], "message_id": msg_id, "reactions": reactions})
 
 async def handle_typing(ws, data):
     if ws not in clients:
         return
     info = clients[ws]
-    channel_id = info["channel"]
-    await broadcast(channel_id, {
-        "type": "typing",
-        "username": info["username"],
-        "channel_id": channel_id
-    }, exclude=ws)
-
-# ─── Dispatcher ─────────────────────────────────────────────────────────────
+    await broadcast(info["channel"], {"type": "typing", "username": info["username"], "channel_id": info["channel"]}, exclude=ws)
 
 async def handle_webrtc_relay(ws, data):
-    """Relaye les messages WebRTC vers le bon destinataire"""
     if ws not in clients:
         return
     info = clients[ws]
     target_id = data.get("target")
-    # Ajoute l'identité de l'expéditeur
     data["from_id"] = info["user_id"]
     data["from_name"] = info["username"]
-    # Trouve le websocket cible
     target_ws = next((w for w, i in clients.items() if i["user_id"] == target_id), None)
     if target_ws:
         await target_ws.send(json.dumps(data))
 
 async def handle_call_broadcast(ws, data):
-    """Broadcast un événement d'appel à tout le canal"""
     if ws not in clients:
         return
     info = clients[ws]
@@ -321,12 +226,12 @@ async def handle_call_broadcast(ws, data):
 HANDLERS = {
     "register":       handle_register,
     "login":          handle_login,
+    "reset_password": handle_reset_password,
     "join_channel":   handle_join_channel,
     "send_message":   handle_send_message,
     "delete_message": handle_delete_message,
     "reaction":       handle_reaction,
     "typing":         handle_typing,
-    "reset_password":  handle_reset_password,
     "call_start":     handle_call_broadcast,
     "call_end":       handle_call_broadcast,
     "webrtc_offer":   handle_webrtc_relay,
@@ -356,16 +261,13 @@ async def handler(ws):
             del clients[ws]
             await broadcast_presence()
 
-# ─── Point d'entrée ──────────────────────────────────────────────────────────
-
 async def main():
-    init_db()
-    print("✅ Base de données initialisée.")
-    print("🚀 Serveur démarré sur ws://localhost:8765")
-    print("   Ouvre index.html dans ton navigateur pour te connecter !\n")
-    import os
     port = int(os.environ.get("PORT", 8765))
-    async with serve(handler, "0.0.0.0", port):
+    host = "0.0.0.0"
+    init_db()
+    print(f"✅ Base de données initialisée.")
+    print(f"🚀 Serveur démarré sur ws://{host}:{port}")
+    async with serve(handler, host, port):
         await asyncio.Future()
 
 if __name__ == "__main__":
